@@ -147,7 +147,7 @@ class User {
 
   // Find user by ID
   static async findById(id) {
-    const query = 'SELECT id, first_name, last_name, username, email, phone, role, created_at FROM users WHERE id = $1';
+    const query = 'SELECT id, first_name, last_name, username, email, phone, role, profile_image_url as profile_image, created_at FROM users WHERE id = $1';
     
     try {
       const result = await pool.query(query, [id]);
@@ -164,19 +164,22 @@ class User {
 
   // Update user
   static async update(id, updates) {
-    const { firstName, lastName, phone } = updates;
+    const { first_name, last_name, email, username, phone, profile_image } = updates;
     
     const query = `
       UPDATE users 
       SET first_name = COALESCE($1, first_name),
           last_name = COALESCE($2, last_name),
-          phone = COALESCE($3, phone),
+          email = COALESCE($3, email),
+          username = COALESCE($4, username),
+          phone = COALESCE($5, phone),
+          profile_image_url = COALESCE($6, profile_image_url),
           updated_at = CURRENT_TIMESTAMP
-      WHERE id = $4
-      RETURNING id, first_name, last_name, username, email, phone, role, updated_at
+      WHERE id = $7
+      RETURNING id, first_name, last_name, username, email, phone, role, profile_image_url as profile_image, updated_at
     `;
     
-    const values = [firstName, lastName, phone, id];
+    const values = [first_name, last_name, email, username, phone, profile_image, id];
     
     try {
       const result = await pool.query(query, values);

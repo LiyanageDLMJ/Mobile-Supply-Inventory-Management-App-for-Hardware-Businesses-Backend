@@ -258,10 +258,82 @@ exports.getMe = async (req, res) => {
         email: user.email,
         phone: user.phone,
         role: user.role,
+        profileImage: user.profile_image,
       },
     });
   } catch (error) {
     console.error('Get user error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error',
+    });
+  }
+};
+
+// @desc    Update user profile
+// @route   PUT /api/users/profile
+// @access  Private
+exports.updateProfile = async (req, res) => {
+  try {
+    const { firstName, lastName, email, username, phoneNumber, profileImage } = req.body;
+
+    const user = await User.findById(req.user.id);
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found',
+      });
+    }
+
+    // Check if email is being changed and if it's already taken
+    if (email && email !== user.email) {
+      const existingUser = await User.findByEmail(email);
+      if (existingUser) {
+        return res.status(400).json({
+          success: false,
+          message: 'Email already in use',
+        });
+      }
+    }
+
+    // Check if username is being changed and if it's already taken
+    if (username && username !== user.username) {
+      const existingUser = await User.findByUsername(username);
+      if (existingUser) {
+        return res.status(400).json({
+          success: false,
+          message: 'Username already taken',
+        });
+      }
+    }
+
+    // Update user
+    const updatedUser = await User.update(req.user.id, {
+      first_name: firstName || user.first_name,
+      last_name: lastName || user.last_name,
+      email: email || user.email,
+      username: username || user.username,
+      phone: phoneNumber || user.phone,
+      profile_image: profileImage !== undefined ? profileImage : user.profile_image,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Profile updated successfully',
+      data: {
+        id: updatedUser.id,
+        firstName: updatedUser.first_name,
+        lastName: updatedUser.last_name,
+        username: updatedUser.username,
+        email: updatedUser.email,
+        phoneNumber: updatedUser.phone,
+        role: updatedUser.role,
+        profileImage: updatedUser.profile_image || updatedUser.profileImage,
+      },
+    });
+  } catch (error) {
+    console.error('Update profile error:', error);
     res.status(500).json({
       success: false,
       message: 'Server error',
