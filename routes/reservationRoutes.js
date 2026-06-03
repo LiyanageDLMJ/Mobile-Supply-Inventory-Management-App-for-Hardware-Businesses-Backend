@@ -1,11 +1,12 @@
 const express = require('express');
 const router = express.Router();
 const reservationController = require('../controllers/reservationController');
-const { protect, authorize } = require('../middleware/auth');
+const { protect, authorize, requireVerified } = require('../middleware/auth');
 
-// All routes require authentication and SHOP_OWNER role
+// Shop-owner reservation actions are business operations — admin must verify first.
 router.use(protect);
 router.use(authorize('SHOP_OWNER'));
+router.use(requireVerified);
 
 router.get('/', reservationController.getReservations);
 router.post('/:id/accept', reservationController.acceptReservation);

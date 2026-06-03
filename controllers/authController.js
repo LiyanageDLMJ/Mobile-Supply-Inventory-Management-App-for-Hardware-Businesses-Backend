@@ -25,10 +25,19 @@ exports.register = async (req, res) => {
       });
     }
 
-    const { 
+    const {
       firstName, lastName, username, email, phone, password, accountType,
-      businessName, businessRegNumber, nicNumber, address, city, province, postalCode
+      businessName, businessRegNumber, nicNumber, address, city, province, postalCode,
+      latitude, longitude,
     } = req.body;
+
+    // Block admin self-registration — admins are seeded by ops
+    if (accountType === 'ADMIN') {
+      return res.status(403).json({
+        success: false,
+        message: 'Admin accounts cannot be self-registered.',
+      });
+    }
 
     // Validate required fields based on account type
     if (accountType === 'SHOP_OWNER' || accountType === 'SUPPLIER') {
@@ -106,30 +115,45 @@ exports.register = async (req, res) => {
       postalCode,
     });
 
-    // Create Shop or Supplier profile
-    if (accountType === 'SHOP_OWNER') {
-      await Shop.create({
-        ownerId: user.id,
-        shopName: businessName,
-        businessRegNumber: businessRegNumber,
-        phone: phone,
-        email: email,
-        address: address || 'Not provided',
-        city: city || 'Not provided',
-        province: province,
-        postalCode: postalCode,
-      });
-    } else if (accountType === 'SUPPLIER') {
-      await Supplier.create({
-        userId: user.id,
-        companyName: businessName,
-        businessRegNumber: businessRegNumber,
-        phone: phone,
-        email: email,
-        address: address || 'Not provided',
-        city: city || 'Not provided',
-        province: province,
-        postalCode: postalCode,
+    // Create Shop or Supplier profile (cleanup user if it fails)
+    try {
+      if (accountType === 'SHOP_OWNER') {
+        await Shop.create({
+          ownerId: user.id,
+          shopName: businessName,
+          businessRegNumber: businessRegNumber,
+          phone: phone,
+          email: email,
+          address: address || 'Not provided',
+          city: city || 'Not provided',
+          province: province,
+          postalCode: postalCode,
+          latitude: latitude || null,
+          longitude: longitude || null,
+        });
+      } else if (accountType === 'SUPPLIER') {
+        await Supplier.create({
+          userId: user.id,
+          companyName: businessName,
+          businessRegNumber: businessRegNumber,
+          phone: phone,
+          email: email,
+          address: address || 'Not provided',
+          city: city || 'Not provided',
+          province: province,
+          postalCode: postalCode,
+          latitude: latitude || null,
+          longitude: longitude || null,
+        });
+      }
+    } catch (profileError) {
+      // Roll back the user row so the email/username/business reg are free again
+      const supabase = require('../config/supabase');
+      await supabase.from('users').delete().eq('id', user.id);
+      console.error('Profile creation failed, rolled back user:', profileError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to create business profile: ' + (profileError.message || 'unknown error'),
       });
     }
 
@@ -151,6 +175,7 @@ exports.register = async (req, res) => {
           businessName: user.business_name,
           businessRegNumber: user.business_reg_number,
           nicNumber: user.nic_number,
+          verificationStatus: user.verification_status,
         },
         token,
       },
@@ -198,8 +223,9 @@ exports.login = async (req, res) => {
       });
     }
 
-    // Check role match
-    if (loginAs && user.role !== loginAs) {
+    // Check role match — admins bypass this so they can log in from the
+    // existing 3-option role dropdown without UI changes.
+    if (loginAs && user.role !== 'ADMIN' && user.role !== loginAs) {
       return res.status(403).json({
         success: false,
         message: `This account is registered as ${user.role}, not ${loginAs}`,
@@ -221,6 +247,11 @@ exports.login = async (req, res) => {
           email: user.email,
           phone: user.phone,
           role: user.role,
+          profileImage: user.profile_image_url || null,
+          verificationStatus:
+            user.verification_status ||
+            (user.role === 'CUSTOMER' || user.role === 'ADMIN' ? 'VERIFIED' : 'NOT_SUBMITTED'),
+          rejectionReason: user.rejection_reason || null,
         },
         token,
       },
@@ -259,6 +290,12 @@ exports.getMe = async (req, res) => {
         phone: user.phone,
         role: user.role,
         profileImage: user.profile_image,
+        verificationStatus:
+          user.verification_status ||
+          (user.role === 'CUSTOMER' || user.role === 'ADMIN' ? 'VERIFIED' : 'NOT_SUBMITTED'),
+        rejectionReason: user.rejection_reason || null,
+        submittedAt: user.submitted_at || null,
+        verifiedAt: user.verified_at || null,
       },
     });
   } catch (error) {
@@ -275,6 +312,11 @@ exports.getMe = async (req, res) => {
 // @access  Private
 exports.updateProfile = async (req, res) => {
   try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+
     const { firstName, lastName, email, username, phoneNumber, profileImage } = req.body;
 
     const user = await User.findById(req.user.id);
@@ -338,5 +380,93 @@ exports.updateProfile = async (req, res) => {
       success: false,
       message: 'Server error',
     });
+  }
+};
+
+// @desc    Request password reset
+// @route   POST /api/auth/forgot-password
+// @access  Public
+exports.requestPasswordReset = async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+
+    const { email } = req.body;
+    const user = await User.findByEmail(email);
+
+    if (!user) {
+      return res.json({
+        success: true,
+        message: 'If an account with that email exists, a reset link has been sent.',
+      });
+    }
+
+    // Generate a simple reset token (in production, use crypto.randomBytes)
+    const resetToken = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+    const resetExpiry = new Date(Date.now() + 1 * 60 * 60 * 1000); // 1 hour
+
+    const supabase = require('../config/supabase');
+    await supabase.from('users')
+      .update({ reset_token: resetToken, reset_token_expiry: resetExpiry })
+      .eq('id', user.id);
+
+    // In production, send email with reset link. For now, log it.
+    console.log(`Reset token for ${email}: ${resetToken}`);
+
+    res.json({
+      success: true,
+      message: 'Password reset token generated. Check console for token (production will email it).',
+      resetToken, // Remove in production
+    });
+  } catch (error) {
+    console.error('Forgot password error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
+  }
+};
+
+// @desc    Reset password with token
+// @route   POST /api/auth/reset-password
+// @access  Public
+exports.resetPassword = async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+
+    const { email, resetToken, newPassword } = req.body;
+
+    const supabase = require('../config/supabase');
+    const { data: user, error } = await supabase.from('users')
+      .select('*')
+      .eq('email', email)
+      .eq('reset_token', resetToken)
+      .maybeSingle();
+
+    if (error || !user) {
+      return res.status(400).json({ success: false, message: 'Invalid or expired reset token' });
+    }
+
+    if (new Date(user.reset_token_expiry) < new Date()) {
+      return res.status(400).json({ success: false, message: 'Reset token has expired' });
+    }
+
+    // Hash new password
+    const hashedPassword = await User.hashPassword(newPassword);
+
+    // Update password and clear reset token
+    await supabase.from('users')
+      .update({ password: hashedPassword, reset_token: null, reset_token_expiry: null })
+      .eq('id', user.id);
+
+    res.json({
+      success: true,
+      message: 'Password reset successfully. You can now login with your new password.',
+    });
+  } catch (error) {
+    console.error('Reset password error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
   }
 };

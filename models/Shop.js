@@ -1,121 +1,90 @@
-const pool = require('../config/database');
+const supabase = require('../config/supabase');
 
 class Shop {
-  // Create shops table
-  static async createTable() {
-    const query = `
-      CREATE TABLE IF NOT EXISTS shops (
-        id SERIAL PRIMARY KEY,
-        owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        shop_name VARCHAR(255) NOT NULL,
-        business_reg_number VARCHAR(100) UNIQUE NOT NULL,
-        description TEXT,
-        phone VARCHAR(20),
-        email VARCHAR(255),
-        address TEXT NOT NULL,
-        city VARCHAR(100) NOT NULL,
-        province VARCHAR(100),
-        postal_code VARCHAR(20),
-        
-        -- Business hours
-        opening_time TIME,
-        closing_time TIME,
-        working_days VARCHAR(100), -- JSON string: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-        
-        -- Loyalty program
-        loyalty_points INTEGER DEFAULT 0,
-        loyalty_tier VARCHAR(50) DEFAULT 'Bronze', -- Bronze, Silver, Gold, Platinum
-        
-        -- Status
-        is_active BOOLEAN DEFAULT TRUE,
-        is_verified BOOLEAN DEFAULT FALSE,
-        
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        
-        UNIQUE(owner_id)
-      );
-      
-      CREATE INDEX IF NOT EXISTS idx_shops_owner ON shops(owner_id);
-      CREATE INDEX IF NOT EXISTS idx_shops_city ON shops(city);
-      CREATE INDEX IF NOT EXISTS idx_shops_loyalty_tier ON shops(loyalty_tier);
-    `;
-    
-    try {
-      await pool.query(query);
-      console.log('✅ Shops table created successfully');
-    } catch (error) {
-      console.error('❌ Error creating shops table:', error);
-      throw error;
-    }
-  }
-
-  // Create new shop
   static async create(shopData) {
     const {
-      ownerId, shopName, businessRegNumber, description, phone, email,
-      address, city, province, postalCode, openingTime, closingTime, workingDays
+      ownerId, shopName, businessRegNumber, description, phone, email, address,
+      city, province, postalCode, openingTime, closingTime, workingDays,
+      latitude, longitude,
     } = shopData;
 
-    const query = `
-      INSERT INTO shops (
-        owner_id, shop_name, business_reg_number, description, phone, email,
-        address, city, province, postal_code, opening_time, closing_time, working_days
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-      RETURNING *
-    `;
-
-    const values = [
-      ownerId, shopName, businessRegNumber, description || null, phone, email,
-      address, city, province || null, postalCode || null,
-      openingTime || null, closingTime || null, workingDays || null
-    ];
-
-    try {
-      const result = await pool.query(query, values);
-      return result.rows[0];
-    } catch (error) {
-      console.error('Error creating shop:', error);
-      throw error;
+    const insertData = {
+      owner_id: ownerId,
+      shop_name: shopName,
+      business_reg_number: businessRegNumber,
+      description: description || null,
+      phone: phone || '',   // empty string guards against NOT NULL DB constraint
+      email: email || null,
+      address: address || null,
+      city: city || null,
+      province: province || null,
+      postal_code: postalCode || null,
+      opening_time: openingTime || null,
+      closing_time: closingTime || null,
+      working_days: workingDays || null,
+      // Shops are visible to customers by default. Unverified owners can't add
+      // products yet (verification gate), so an empty shop won't appear in
+      // browse/search anyway — but the flag must be true for it to ever show.
+      is_active: true,
+    };
+    // Only include location if the columns exist (migration has been run)
+    if (latitude != null && longitude != null) {
+      insertData.latitude = parseFloat(latitude);
+      insertData.longitude = parseFloat(longitude);
     }
+
+    const { data, error } = await supabase.from('shops').insert(insertData).select().single();
+
+    if (error) throw error;
+    return data;
   }
 
-  // Get shop by owner ID
+  static async updateLocation(shopId, latitude, longitude) {
+    const { data, error } = await supabase.from('shops')
+      .update({
+        latitude: parseFloat(latitude),
+        longitude: parseFloat(longitude),
+      })
+      .eq('id', shopId)
+      .select()
+      .single();
+
+    if (error) throw error;
+    return data;
+  }
+
   static async findByOwnerId(ownerId) {
-    const query = 'SELECT * FROM shops WHERE owner_id = $1';
-    try {
-      const result = await pool.query(query, [ownerId]);
-      return result.rows[0];
-    } catch (error) {
-      console.error('Error finding shop by owner:', error);
+    const { data, error } = await supabase.from('shops').select('*').eq('owner_id', ownerId).maybeSingle();
+    if (error) {
+      // Location columns may not exist yet — retry with explicit safe column list
+      if (error.message && error.message.includes('latitude')) {
+        const { data: safeData, error: safeError } = await supabase.from('shops')
+          .select('id, owner_id, shop_name, business_reg_number, description, phone, email, address, city, province, postal_code, opening_time, closing_time, working_days, is_active, created_at, updated_at')
+          .eq('owner_id', ownerId).maybeSingle();
+        if (safeError) throw safeError;
+        return safeData;
+      }
       throw error;
     }
+    return data;
   }
 
-  // Update loyalty points
   static async updateLoyaltyPoints(shopId, points) {
-    const query = `
-      UPDATE shops 
-      SET loyalty_points = loyalty_points + $1,
-          loyalty_tier = CASE
-            WHEN loyalty_points + $1 >= 5000 THEN 'Platinum'
-            WHEN loyalty_points + $1 >= 2000 THEN 'Gold'
-            WHEN loyalty_points + $1 >= 500 THEN 'Silver'
-            ELSE 'Bronze'
-          END,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = $2
-      RETURNING *
-    `;
-    
-    try {
-      const result = await pool.query(query, [points, shopId]);
-      return result.rows[0];
-    } catch (error) {
-      console.error('Error updating loyalty points:', error);
-      throw error;
-    }
+    const { data: current, error: fetchError } = await supabase.from('shops')
+      .select('loyalty_points').eq('id', shopId).single();
+    if (fetchError) throw fetchError;
+
+    const newPoints = (current.loyalty_points || 0) + points;
+    const newTier =
+      newPoints >= 5000 ? 'Platinum' :
+      newPoints >= 2000 ? 'Gold' :
+      newPoints >= 500  ? 'Silver' : 'Bronze';
+
+    const { data, error } = await supabase.from('shops')
+      .update({ loyalty_points: newPoints, loyalty_tier: newTier })
+      .eq('id', shopId).select().single();
+    if (error) throw error;
+    return data;
   }
 }
 

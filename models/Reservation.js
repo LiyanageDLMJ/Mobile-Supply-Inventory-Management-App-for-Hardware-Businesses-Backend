@@ -1,211 +1,115 @@
-const pool = require('../config/database');
+const supabase = require('../config/supabase');
 
 class Reservation {
-  // Create reservations table (B2C - customers reserving items from shops)
-  static async createTable() {
-    const query = `
-      CREATE TABLE IF NOT EXISTS reservations (
-        id SERIAL PRIMARY KEY,
-        reservation_number VARCHAR(50) UNIQUE NOT NULL,
-        
-        -- Parties involved
-        customer_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        shop_id INTEGER NOT NULL REFERENCES shops(id) ON DELETE CASCADE,
-        product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
-        
-        -- Reservation details
-        quantity INTEGER NOT NULL,
-        unit_price DECIMAL(10, 2) NOT NULL,
-        total_amount DECIMAL(10, 2) NOT NULL,
-        
-        -- Status tracking
-        status VARCHAR(50) NOT NULL DEFAULT 'Pending',
-        -- Pending, Accepted, Rejected, Completed, Cancelled, Expired
-        
-        -- Pickup details
-        pickup_date DATE,
-        pickup_time TIME,
-        actual_pickup_date TIMESTAMP,
-        
-        -- Notes
-        customer_notes TEXT,
-        shop_notes TEXT,
-        rejection_reason TEXT,
-        
-        -- Expiry (auto-cancel if not picked up)
-        expires_at TIMESTAMP,
-        
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-      
-      CREATE INDEX IF NOT EXISTS idx_reservations_customer ON reservations(customer_id);
-      CREATE INDEX IF NOT EXISTS idx_reservations_shop ON reservations(shop_id);
-      CREATE INDEX IF NOT EXISTS idx_reservations_status ON reservations(status);
-      CREATE INDEX IF NOT EXISTS idx_reservations_number ON reservations(reservation_number);
-    `;
-    
-    try {
-      await pool.query(query);
-      console.log('✅ Reservations table created successfully');
-    } catch (error) {
-      console.error('❌ Error creating reservations table:', error);
-      throw error;
-    }
-  }
-
-  // Generate reservation number
-  static generateReservationNumber() {
-    const timestamp = Date.now();
-    const random = Math.floor(Math.random() * 1000);
-    return `RES-${timestamp}-${random}`;
-  }
-
-  // Create new reservation
-  static async create(reservationData) {
+  static async create(data) {
     const {
-      customerId, shopId, productId, quantity, unitPrice, totalAmount,
-      pickupDate, pickupTime, customerNotes
-    } = reservationData;
+      customerId, shopId, productId, quantity, unitPrice,
+      totalAmount, pickupDate, pickupTime, customerNotes,
+    } = data;
 
-    const reservationNumber = this.generateReservationNumber();
-    
-    // Set expiry to 48 hours from now
-    const expiresAt = new Date();
-    expiresAt.setHours(expiresAt.getHours() + 48);
+    const reservationNumber = `RES-${Date.now()}-${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
 
-    const query = `
-      INSERT INTO reservations (
-        reservation_number, customer_id, shop_id, product_id, quantity,
-        unit_price, total_amount, pickup_date, pickup_time, customer_notes, expires_at
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-      RETURNING *
-    `;
+    const { data: reservation, error } = await supabase.from('reservations').insert({
+      reservation_number: reservationNumber,
+      customer_id: customerId,
+      shop_id: shopId,
+      product_id: productId,
+      quantity,
+      unit_price: unitPrice,
+      total_amount: totalAmount,
+      pickup_date: pickupDate || null,
+      pickup_time: pickupTime || null,
+      customer_notes: customerNotes || null,
+    }).select().single();
 
-    const values = [
-      reservationNumber, customerId, shopId, productId, quantity,
-      unitPrice, totalAmount, pickupDate || null, pickupTime || null,
-      customerNotes || null, expiresAt
-    ];
-
-    try {
-      const result = await pool.query(query, values);
-      return result.rows[0];
-    } catch (error) {
-      console.error('Error creating reservation:', error);
-      throw error;
-    }
+    if (error) throw error;
+    return reservation;
   }
 
-  // Get reservations by shop
-  static async findByShopId(shopId, status = null) {
-    let query = `
-      SELECT r.*, 
-             u.first_name || ' ' || u.last_name as customer_name,
-             u.phone as customer_phone,
-             p.product_name, p.image_url
-      FROM reservations r
-      JOIN users u ON r.customer_id = u.id
-      JOIN products p ON r.product_id = p.id
-      WHERE r.shop_id = $1
-    `;
-    
-    const values = [shopId];
-    
-    if (status) {
-      query += ' AND r.status = $2';
-      values.push(status);
-    }
-    
-    query += ' ORDER BY r.created_at DESC';
+  static async findByShopId(shopId, status) {
+    let query = supabase.from('reservations').select('*').eq('shop_id', shopId);
+    if (status) query = query.eq('status', status);
+    query = query.order('created_at', { ascending: false });
 
-    try {
-      const result = await pool.query(query, values);
-      return result.rows;
-    } catch (error) {
-      console.error('Error finding reservations:', error);
-      throw error;
-    }
+    const { data: reservations, error } = await query;
+    if (error) throw error;
+    if (!reservations || reservations.length === 0) return [];
+
+    // Fetch customer and product details
+    const customerIds = [...new Set(reservations.map(r => r.customer_id))];
+    const productIds  = [...new Set(reservations.map(r => r.product_id))];
+
+    const [{ data: customers }, { data: products }] = await Promise.all([
+      supabase.from('users').select('id, first_name, last_name, email, phone').in('id', customerIds),
+      supabase.from('products').select('id, product_name, unit_of_measure, image_url').in('id', productIds),
+    ]);
+
+    const customerMap = (customers || []).reduce((m, c) => { m[c.id] = c; return m; }, {});
+    const productMap  = (products  || []).reduce((m, p) => { m[p.id] = p; return m; }, {});
+
+    return reservations.map(r => ({
+      ...r,
+      first_name:      customerMap[r.customer_id]?.first_name,
+      last_name:       customerMap[r.customer_id]?.last_name,
+      customer_email:  customerMap[r.customer_id]?.email,
+      customer_phone:  customerMap[r.customer_id]?.phone,
+      product_name:    productMap[r.product_id]?.product_name,
+      unit_of_measure: productMap[r.product_id]?.unit_of_measure,
+      image_url:       productMap[r.product_id]?.image_url,
+    }));
   }
 
-  // Get reservations by customer
   static async findByCustomerId(customerId) {
-    const query = `
-      SELECT r.*, 
-             s.shop_name,
-             p.product_name, p.image_url
-      FROM reservations r
-      JOIN shops s ON r.shop_id = s.id
-      JOIN products p ON r.product_id = p.id
-      WHERE r.customer_id = $1
-      ORDER BY r.created_at DESC
-    `;
+    const { data: reservations, error } = await supabase.from('reservations')
+      .select('*').eq('customer_id', customerId).order('created_at', { ascending: false });
+    if (error) throw error;
+    if (!reservations || reservations.length === 0) return [];
 
-    try {
-      const result = await pool.query(query, [customerId]);
-      return result.rows;
-    } catch (error) {
-      console.error('Error finding customer reservations:', error);
-      throw error;
-    }
+    const shopIds    = [...new Set(reservations.map(r => r.shop_id))];
+    const productIds = [...new Set(reservations.map(r => r.product_id))];
+
+    const [{ data: shops }, { data: products }] = await Promise.all([
+      supabase.from('shops').select('id, shop_name, city, address, phone').in('id', shopIds),
+      supabase.from('products').select('id, product_name, unit_of_measure, image_url').in('id', productIds),
+    ]);
+
+    const shopMap    = (shops    || []).reduce((m, s) => { m[s.id] = s; return m; }, {});
+    const productMap = (products || []).reduce((m, p) => { m[p.id] = p; return m; }, {});
+
+    return reservations.map(r => ({
+      ...r,
+      shop_name:       shopMap[r.shop_id]?.shop_name,
+      shop_city:       shopMap[r.shop_id]?.city,
+      shop_address:    shopMap[r.shop_id]?.address,
+      shop_phone:      shopMap[r.shop_id]?.phone,
+      product_name:    productMap[r.product_id]?.product_name,
+      unit_of_measure: productMap[r.product_id]?.unit_of_measure,
+      image_url:       productMap[r.product_id]?.image_url,
+    }));
   }
 
-  // Accept reservation
-  static async accept(reservationId, shopNotes = null) {
-    const query = `
-      UPDATE reservations 
-      SET status = 'Accepted', 
-          shop_notes = $1, 
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = $2
-      RETURNING *
-    `;
-    try {
-      const result = await pool.query(query, [shopNotes, reservationId]);
-      return result.rows[0];
-    } catch (error) {
-      console.error('Error accepting reservation:', error);
-      throw error;
-    }
+  static async accept(id, shopNotes) {
+    const { data, error } = await supabase.from('reservations')
+      .update({ status: 'Accepted', shop_notes: shopNotes || null, updated_at: new Date().toISOString() })
+      .eq('id', id).select().single();
+    if (error) throw error;
+    return data;
   }
 
-  // Reject reservation
-  static async reject(reservationId, rejectionReason) {
-    const query = `
-      UPDATE reservations 
-      SET status = 'Rejected', 
-          rejection_reason = $1, 
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = $2
-      RETURNING *
-    `;
-    try {
-      const result = await pool.query(query, [rejectionReason, reservationId]);
-      return result.rows[0];
-    } catch (error) {
-      console.error('Error rejecting reservation:', error);
-      throw error;
-    }
+  static async reject(id, rejectionReason) {
+    const { data, error } = await supabase.from('reservations')
+      .update({ status: 'Rejected', rejection_reason: rejectionReason, updated_at: new Date().toISOString() })
+      .eq('id', id).select().single();
+    if (error) throw error;
+    return data;
   }
 
-  // Complete reservation (item picked up)
-  static async complete(reservationId) {
-    const query = `
-      UPDATE reservations 
-      SET status = 'Completed', 
-          actual_pickup_date = CURRENT_TIMESTAMP,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = $1
-      RETURNING *
-    `;
-    try {
-      const result = await pool.query(query, [reservationId]);
-      return result.rows[0];
-    } catch (error) {
-      console.error('Error completing reservation:', error);
-      throw error;
-    }
+  static async complete(id) {
+    const { data, error } = await supabase.from('reservations')
+      .update({ status: 'Completed', updated_at: new Date().toISOString() })
+      .eq('id', id).select().single();
+    if (error) throw error;
+    return data;
   }
 }
 

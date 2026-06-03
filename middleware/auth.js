@@ -54,3 +54,26 @@ exports.authorize = (...roles) => {
     next();
   };
 };
+
+// Block business actions until admin has verified the user.
+// Customers and admins are always allowed through.
+exports.requireVerified = (req, res, next) => {
+  const role = req.user.role;
+  if (role === 'CUSTOMER' || role === 'ADMIN') return next();
+
+  const status = req.user.verification_status;
+  if (status === 'VERIFIED') return next();
+
+  return res.status(403).json({
+    success: false,
+    code: 'VERIFICATION_REQUIRED',
+    verification_status: status || 'NOT_SUBMITTED',
+    rejection_reason: req.user.rejection_reason || null,
+    message:
+      status === 'PENDING'
+        ? 'Your account is awaiting admin verification. Business actions are disabled until then.'
+        : status === 'REJECTED'
+        ? 'Your verification was rejected. Please re-upload your documents from your profile.'
+        : 'You must upload your business documents and be verified by the admin before using this feature.',
+  });
+};

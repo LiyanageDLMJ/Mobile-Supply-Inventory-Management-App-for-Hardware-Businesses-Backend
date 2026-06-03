@@ -1,192 +1,213 @@
-const pool = require('../config/database');
+const supabase = require('../config/supabase');
 const bcrypt = require('bcryptjs');
 
 class User {
-  // Create users table with business verification fields
-  static async createTable() {
-    const query = `
-      CREATE TABLE IF NOT EXISTS users (
-        id SERIAL PRIMARY KEY,
-        first_name VARCHAR(100) NOT NULL,
-        last_name VARCHAR(100) NOT NULL,
-        username VARCHAR(100) UNIQUE NOT NULL,
-        email VARCHAR(255) UNIQUE NOT NULL,
-        phone VARCHAR(20),
-        password VARCHAR(255) NOT NULL,
-        role VARCHAR(50) NOT NULL CHECK (role IN ('SHOP_OWNER', 'SUPPLIER', 'CUSTOMER', 'ADMIN')),
-        
-        -- Business verification for Shop Owners and Suppliers
-        business_name VARCHAR(255),
-        business_reg_number VARCHAR(100) UNIQUE,
-        
-        -- NIC verification for Customers
-        nic_number VARCHAR(20) UNIQUE,
-        
-        -- Additional profile fields
-        address TEXT,
-        city VARCHAR(100),
-        province VARCHAR(100),
-        postal_code VARCHAR(20),
-        profile_image_url TEXT,
-        
-        -- Account status
-        is_verified BOOLEAN DEFAULT FALSE,
-        is_active BOOLEAN DEFAULT TRUE,
-        
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-      
-      CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
-      CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
-      CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
-      CREATE INDEX IF NOT EXISTS idx_users_business_reg ON users(business_reg_number);
-      CREATE INDEX IF NOT EXISTS idx_users_nic ON users(nic_number);
-    `;
-    
-    try {
-      await pool.query(query);
-      console.log('✅ Users table created successfully');
-    } catch (error) {
-      console.error('❌ Error creating users table:', error);
-      throw error;
-    }
-  }
-
-  // Create new user
   static async create(userData) {
-    const { 
+    const {
       firstName, lastName, username, email, phone, password, accountType,
-      businessName, businessRegNumber, nicNumber, address, city, province, postalCode
+      businessName, businessRegNumber, nicNumber, address, city, province, postalCode,
     } = userData;
-    
-    // Hash password
+
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
-    
-    const query = `
-      INSERT INTO users (
-        first_name, last_name, username, email, phone, password, role,
-        business_name, business_reg_number, nic_number, address, city, province, postal_code
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-      RETURNING id, first_name, last_name, username, email, phone, role, 
-                business_name, business_reg_number, nic_number, created_at
-    `;
-    
-    const values = [
-      firstName, lastName, username, email, phone || null, hashedPassword, accountType,
-      businessName || null, businessRegNumber || null, nicNumber || null,
-      address || null, city || null, province || null, postalCode || null
-    ];
-    
-    try {
-      const result = await pool.query(query, values);
-      return result.rows[0];
-    } catch (error) {
+
+    // Customers don't need verification; business roles start NOT_SUBMITTED
+    const initialStatus =
+      accountType === 'CUSTOMER' ? 'VERIFIED' : 'NOT_SUBMITTED';
+
+    const { data, error } = await supabase.from('users').insert({
+      first_name: firstName,
+      last_name: lastName,
+      username,
+      email,
+      phone: phone || null,
+      password: hashedPassword,
+      role: accountType,
+      business_name: businessName || null,
+      business_reg_number: businessRegNumber || null,
+      nic_number: nicNumber || null,
+      address: address || null,
+      city: city || null,
+      province: province || null,
+      postal_code: postalCode || null,
+      verification_status: initialStatus,
+    }).select('id, first_name, last_name, username, email, phone, role, business_name, business_reg_number, nic_number, verification_status, created_at').single();
+
+    if (error) {
       if (error.code === '23505') {
-        // Unique violation
-        if (error.constraint === 'users_email_key') {
-          throw new Error('Email already exists');
-        }
-        if (error.constraint === 'users_username_key') {
-          throw new Error('Username already exists');
-        }
+        if (error.message.includes('users_email_key') || error.message.includes('email')) throw new Error('Email already exists');
+        if (error.message.includes('users_username_key') || error.message.includes('username')) throw new Error('Username already exists');
+        if (error.message.includes('business_reg_number')) throw new Error('Business registration number already exists');
+        if (error.message.includes('nic_number')) throw new Error('NIC number already exists');
       }
       throw error;
     }
+    return data;
   }
 
-  // Find user by email
   static async findByEmail(email) {
-    const query = 'SELECT * FROM users WHERE email = $1';
-    
-    try {
-      const result = await pool.query(query, [email]);
-      return result.rows[0];
-    } catch (error) {
-      throw error;
-    }
+    const { data, error } = await supabase.from('users').select('*').eq('email', email).maybeSingle();
+    if (error) throw error;
+    return data;
   }
 
-  // Find user by username
   static async findByUsername(username) {
-    const query = 'SELECT * FROM users WHERE username = $1';
-    
-    try {
-      const result = await pool.query(query, [username]);
-      return result.rows[0];
-    } catch (error) {
-      throw error;
-    }
+    const { data, error } = await supabase.from('users').select('*').eq('username', username).maybeSingle();
+    if (error) throw error;
+    return data;
   }
 
-  // Find user by business registration number
   static async findByBusinessRegNumber(businessRegNumber) {
-    const query = 'SELECT * FROM users WHERE business_reg_number = $1';
-    
-    try {
-      const result = await pool.query(query, [businessRegNumber]);
-      return result.rows[0];
-    } catch (error) {
-      throw error;
-    }
+    const { data, error } = await supabase.from('users').select('*').eq('business_reg_number', businessRegNumber).maybeSingle();
+    if (error) throw error;
+    return data;
   }
 
-  // Find user by NIC
   static async findByNIC(nicNumber) {
-    const query = 'SELECT * FROM users WHERE nic_number = $1';
-    
-    try {
-      const result = await pool.query(query, [nicNumber]);
-      return result.rows[0];
-    } catch (error) {
-      throw error;
-    }
+    const { data, error } = await supabase.from('users').select('*').eq('nic_number', nicNumber).maybeSingle();
+    if (error) throw error;
+    return data;
   }
 
-  // Find user by ID
   static async findById(id) {
-    const query = 'SELECT id, first_name, last_name, username, email, phone, role, profile_image_url as profile_image, created_at FROM users WHERE id = $1';
-    
-    try {
-      const result = await pool.query(query, [id]);
-      return result.rows[0];
-    } catch (error) {
+    const { data, error } = await supabase.from('users')
+      .select('id, first_name, last_name, username, email, phone, role, profile_image_url, loyalty_points, loyalty_tier, verification_status, rejection_reason, submitted_at, verified_at, created_at')
+      .eq('id', id).maybeSingle();
+    if (error) {
+      // Verification columns may not exist yet — fall back to legacy column list
+      if (error.message && error.message.includes('verification_status')) {
+        const { data: safe, error: safeErr } = await supabase.from('users')
+          .select('id, first_name, last_name, username, email, phone, role, profile_image_url, loyalty_points, loyalty_tier, created_at')
+          .eq('id', id).maybeSingle();
+        if (safeErr) throw safeErr;
+        if (safe) safe.profile_image = safe.profile_image_url;
+        if (safe) safe.verification_status = 'VERIFIED';
+        return safe;
+      }
       throw error;
     }
+    if (data) data.profile_image = data.profile_image_url;
+    return data;
   }
 
-  // Verify password
+  static async getVerificationState(id) {
+    const { data, error } = await supabase.from('users')
+      .select('verification_status, verification_docs, rejection_reason, submitted_at, verified_at')
+      .eq('id', id).maybeSingle();
+    if (error) throw error;
+    return data;
+  }
+
+  static async submitVerification(id, docs) {
+    const { data, error } = await supabase.from('users')
+      .update({
+        verification_status: 'PENDING',
+        verification_docs: docs,
+        rejection_reason: null,
+        submitted_at: new Date().toISOString(),
+      })
+      .eq('id', id)
+      .select('id, verification_status, submitted_at')
+      .single();
+    if (error) throw error;
+    return data;
+  }
+
+  static async approveVerification(id, adminId) {
+    const { data, error } = await supabase.from('users')
+      .update({
+        verification_status: 'VERIFIED',
+        verified_at: new Date().toISOString(),
+        verified_by: adminId,
+        rejection_reason: null,
+      })
+      .eq('id', id)
+      .select('id, verification_status, verified_at')
+      .single();
+    if (error) throw error;
+    return data;
+  }
+
+  static async rejectVerification(id, adminId, reason) {
+    const { data, error } = await supabase.from('users')
+      .update({
+        verification_status: 'REJECTED',
+        rejection_reason: reason,
+        verified_by: adminId,
+      })
+      .eq('id', id)
+      .select('id, verification_status, rejection_reason')
+      .single();
+    if (error) throw error;
+    return data;
+  }
+
+  static async listByVerificationStatus(status) {
+    let query = supabase.from('users')
+      .select('id, first_name, last_name, username, email, phone, role, business_name, business_reg_number, nic_number, verification_status, submitted_at, verified_at, rejection_reason, created_at')
+      .in('role', ['SHOP_OWNER', 'SUPPLIER'])
+      .order('submitted_at', { ascending: false, nullsFirst: false });
+    if (status) query = query.eq('verification_status', status);
+    const { data, error } = await query;
+    if (error) throw error;
+    return data || [];
+  }
+
+  // List all users across every role, with optional role filter + text search.
+  // Used by the admin console's "Users" browser (not the verification workflow).
+  static async listAll({ role, search } = {}) {
+    let query = supabase.from('users')
+      .select('id, first_name, last_name, username, email, phone, role, business_name, verification_status, created_at')
+      .order('created_at', { ascending: false })
+      .limit(200);
+    if (role) query = query.eq('role', role);
+    if (search) {
+      const term = `%${search}%`;
+      query = query.or(
+        `first_name.ilike.${term},last_name.ilike.${term},email.ilike.${term},username.ilike.${term},business_name.ilike.${term}`
+      );
+    }
+    const { data, error } = await query;
+    if (error) throw error;
+    return data || [];
+  }
+
+  static async findAdminId() {
+    const { data, error } = await supabase.from('users')
+      .select('id').eq('role', 'ADMIN').limit(1).maybeSingle();
+    if (error) throw error;
+    return data ? data.id : null;
+  }
+
   static async verifyPassword(plainPassword, hashedPassword) {
     return await bcrypt.compare(plainPassword, hashedPassword);
   }
 
-  // Update user
+  static async hashPassword(plainPassword) {
+    const salt = await bcrypt.genSalt(10);
+    return bcrypt.hash(plainPassword, salt);
+  }
+
   static async update(id, updates) {
     const { first_name, last_name, email, username, phone, profile_image } = updates;
-    
-    const query = `
-      UPDATE users 
-      SET first_name = COALESCE($1, first_name),
-          last_name = COALESCE($2, last_name),
-          email = COALESCE($3, email),
-          username = COALESCE($4, username),
-          phone = COALESCE($5, phone),
-          profile_image_url = COALESCE($6, profile_image_url),
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = $7
-      RETURNING id, first_name, last_name, username, email, phone, role, profile_image_url as profile_image, updated_at
-    `;
-    
-    const values = [first_name, last_name, email, username, phone, profile_image, id];
-    
-    try {
-      const result = await pool.query(query, values);
-      return result.rows[0];
-    } catch (error) {
-      throw error;
-    }
+
+    const updateData = { updated_at: new Date().toISOString() };
+    if (first_name !== undefined) updateData.first_name = first_name;
+    if (last_name !== undefined) updateData.last_name = last_name;
+    if (email !== undefined) updateData.email = email;
+    if (username !== undefined) updateData.username = username;
+    if (phone !== undefined) updateData.phone = phone;
+    if (profile_image !== undefined) updateData.profile_image_url = profile_image;
+
+    const { data, error } = await supabase.from('users')
+      .update(updateData)
+      .eq('id', id)
+      .select('id, first_name, last_name, username, email, phone, role, profile_image_url, updated_at')
+      .single();
+
+    if (error) throw error;
+    if (data) data.profile_image = data.profile_image_url;
+    return data;
   }
 }
 
