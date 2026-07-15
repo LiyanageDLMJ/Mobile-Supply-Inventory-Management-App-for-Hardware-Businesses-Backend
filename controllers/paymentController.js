@@ -64,14 +64,48 @@ exports.confirmPayment = async (req, res) => {
       return res.status(400).json({ success: false, message: 'orderId and paymentIntentId are required' });
     }
 
+    const shop = await Shop.findByOwnerId(req.user.id);
+    if (!shop) return res.status(404).json({ success: false, message: 'Shop not found' });
+
+    const { data: existingOrder, error: orderError } = await supabase.from('orders')
+      .select('*')
+      .eq('id', orderId)
+      .eq('shop_id', shop.id)
+      .maybeSingle();
+    if (orderError) throw orderError;
+    if (!existingOrder) return res.status(404).json({ success: false, message: 'Order not found' });
+
+    if (existingOrder.payment_status === 'Paid') {
+      return res.status(400).json({ success: false, message: 'This order has already been paid' });
+    }
+
+    if (existingOrder.payment_intent_id !== paymentIntentId) {
+      return res.status(400).json({ success: false, message: 'Payment intent does not match this order' });
+    }
+
     const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
     if (paymentIntent.status !== 'succeeded') {
       return res.status(400).json({ success: false, message: `Payment not completed. Status: ${paymentIntent.status}` });
     }
 
+    if (
+      paymentIntent.metadata?.orderId !== String(existingOrder.id) ||
+      paymentIntent.metadata?.shopId !== String(shop.id)
+    ) {
+      return res.status(400).json({ success: false, message: 'Payment metadata does not match this order' });
+    }
+
+    const expectedAmount = Math.round(parseFloat(existingOrder.total_amount) * 100);
+    if (paymentIntent.amount !== expectedAmount || paymentIntent.currency.toLowerCase() !== 'lkr') {
+      return res.status(400).json({ success: false, message: 'Payment amount or currency does not match this order' });
+    }
+
     const { data: order, error: updateError } = await supabase.from('orders')
       .update({ payment_status: 'Paid', status: 'Confirmed', updated_at: new Date().toISOString() })
-      .eq('id', orderId).select().single();
+      .eq('id', orderId)
+      .eq('shop_id', shop.id)
+      .select()
+      .single();
     if (updateError) throw updateError;
 
     // Record payment (ignore conflict if duplicate)

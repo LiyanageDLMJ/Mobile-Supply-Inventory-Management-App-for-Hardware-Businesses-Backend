@@ -4,6 +4,22 @@ const Product = require('../models/Product');
 const Notification = require('../models/Notification');
 const supabase = require('../config/supabase');
 
+const getOwnedReservation = async (userId, reservationId) => {
+  const shop = await Shop.findByOwnerId(userId);
+  if (!shop) return { status: 404, message: 'Shop not found' };
+
+  const { data: reservation, error } = await supabase.from('reservations')
+    .select('*')
+    .eq('id', reservationId)
+    .eq('shop_id', shop.id)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!reservation) return { status: 404, message: 'Reservation not found' };
+
+  return { shop, reservation };
+};
+
 // @desc    Get all reservations for shop
 // @route   GET /api/reservations
 // @access  Private (Shop Owner)
@@ -25,6 +41,14 @@ exports.getReservations = async (req, res) => {
 // @access  Private (Shop Owner)
 exports.acceptReservation = async (req, res) => {
   try {
+    const result = await getOwnedReservation(req.user.id, req.params.id);
+    if (result.status) {
+      return res.status(result.status).json({ success: false, message: result.message });
+    }
+    if (result.reservation.status !== 'Pending') {
+      return res.status(400).json({ success: false, message: `Cannot accept a reservation with status "${result.reservation.status}"` });
+    }
+
     const reservation = await Reservation.accept(req.params.id, req.body.shopNotes);
 
     Notification.create({
@@ -49,6 +73,14 @@ exports.rejectReservation = async (req, res) => {
     const { rejectionReason } = req.body;
     if (!rejectionReason) return res.status(400).json({ success: false, message: 'Rejection reason is required' });
 
+    const result = await getOwnedReservation(req.user.id, req.params.id);
+    if (result.status) {
+      return res.status(result.status).json({ success: false, message: result.message });
+    }
+    if (result.reservation.status !== 'Pending') {
+      return res.status(400).json({ success: false, message: `Cannot reject a reservation with status "${result.reservation.status}"` });
+    }
+
     const reservation = await Reservation.reject(req.params.id, rejectionReason);
 
     Notification.create({
@@ -70,6 +102,25 @@ exports.rejectReservation = async (req, res) => {
 // @access  Private (Shop Owner)
 exports.completeReservation = async (req, res) => {
   try {
+    const result = await getOwnedReservation(req.user.id, req.params.id);
+    if (result.status) {
+      return res.status(result.status).json({ success: false, message: result.message });
+    }
+    if (result.reservation.status !== 'Accepted') {
+      return res.status(400).json({ success: false, message: `Cannot complete a reservation with status "${result.reservation.status}"` });
+    }
+
+    const product = await Product.findById(result.reservation.product_id);
+    if (!product || String(product.shop_id) !== String(result.shop.id)) {
+      return res.status(404).json({ success: false, message: 'Reserved product not found' });
+    }
+    if (product.quantity_on_hand < result.reservation.quantity) {
+      return res.status(400).json({
+        success: false,
+        message: `Only ${product.quantity_on_hand} units available. Cannot complete reservation for ${result.reservation.quantity}.`,
+      });
+    }
+
     const reservation = await Reservation.complete(req.params.id);
 
     // Deduct product stock

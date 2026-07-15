@@ -1,4 +1,5 @@
 const supabase = require('../config/supabase');
+const Rating = require('./Rating');
 
 class Reservation {
   static async create(data) {
@@ -68,9 +69,10 @@ class Reservation {
     const shopIds    = [...new Set(reservations.map(r => r.shop_id))];
     const productIds = [...new Set(reservations.map(r => r.product_id))];
 
-    const [{ data: shops }, { data: products }] = await Promise.all([
+    const [{ data: shops }, { data: products }, ratingMap] = await Promise.all([
       supabase.from('shops').select('id, shop_name, city, address, phone').in('id', shopIds),
       supabase.from('products').select('id, product_name, unit_of_measure, image_url').in('id', productIds),
+      Rating.findForTransactions('SHOP', reservations.map(r => r.id)),
     ]);
 
     const shopMap    = (shops    || []).reduce((m, s) => { m[s.id] = s; return m; }, {});
@@ -85,6 +87,7 @@ class Reservation {
       product_name:    productMap[r.product_id]?.product_name,
       unit_of_measure: productMap[r.product_id]?.unit_of_measure,
       image_url:       productMap[r.product_id]?.image_url,
+      rating:          ratingMap.get(Number(r.id)) || null,
     }));
   }
 

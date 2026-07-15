@@ -1,6 +1,6 @@
 const express = require('express');
 const { body } = require('express-validator');
-const { register, login, getMe, updateProfile, requestPasswordReset, resetPassword } = require('../controllers/authController');
+const { register, login, getMe, updateProfile, changePassword, requestPasswordReset, resetPassword } = require('../controllers/authController');
 const { protect } = require('../middleware/auth');
 
 const router = express.Router();
@@ -80,11 +80,29 @@ const updateProfileValidation = [
     .withMessage('Phone must be 10 digits starting with 0 (e.g., 0701234567)'),
 ];
 
+const changePasswordValidation = [
+  body('currentPassword')
+    .notEmpty()
+    .withMessage('Current password is required'),
+  body('newPassword')
+    .notEmpty()
+    .withMessage('New password is required')
+    .isLength({ min: 6 })
+    .withMessage('Password must be at least 6 characters')
+    .matches(/[A-Z]/)
+    .withMessage('Password must contain at least one uppercase letter')
+    .matches(/[a-z]/)
+    .withMessage('Password must contain at least one lowercase letter')
+    .matches(/[0-9]/)
+    .withMessage('Password must contain at least one number'),
+];
+
 // Routes
 router.post('/register', registerValidation, register);
 router.post('/login', loginValidation, login);
 router.get('/me', protect, getMe);
 router.put('/profile', protect, updateProfileValidation, updateProfile);
+router.put('/change-password', protect, changePasswordValidation, changePassword);
 router.post('/forgot-password', body('email').isEmail(), requestPasswordReset);
 router.post('/reset-password',
   body('email').isEmail(),

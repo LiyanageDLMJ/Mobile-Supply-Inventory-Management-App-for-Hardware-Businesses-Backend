@@ -4,6 +4,7 @@ const Reservation = require('../models/Reservation');
 const Supplier = require('../models/Supplier');
 const Order = require('../models/Order');
 const Notification = require('../models/Notification');
+const Rating = require('../models/Rating');
 const { validateCoordinates } = require('../utils/geolocation');
 const supabase = require('../config/supabase');
 
@@ -180,7 +181,12 @@ exports.updateLocation = async (req, res) => {
 exports.getSuppliers = async (req, res) => {
   try {
     const suppliers = await Supplier.findAll();
-    res.json({ success: true, data: suppliers });
+    const summaries = await Rating.getSummaryMap('SUPPLIER', suppliers.map(s => s.id));
+    const data = suppliers.map(supplier => ({
+      ...supplier,
+      ...(summaries.get(Number(supplier.id)) || { rating_average: null, rating_count: 0 }),
+    }));
+    res.json({ success: true, data });
   } catch (error) {
     console.error('Get suppliers error:', error);
     res.status(500).json({ success: false, message: error.message || 'Server error' });
@@ -303,6 +309,144 @@ exports.getOrder = async (req, res) => {
     res.json({ success: true, data: order });
   } catch (error) {
     console.error('Get order error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
+  }
+};
+
+// @desc    Edit a pending, unpaid B2B order
+// @route   PUT /api/shop/orders/:id
+// @access  Private (Shop Owner)
+exports.updateOrder = async (req, res) => {
+  try {
+    const shop = await Shop.findByOwnerId(req.user.id);
+    if (!shop) return res.status(404).json({ success: false, message: 'Shop not found' });
+
+    const existing = await Order.findByIdWithItems(req.params.id);
+    if (!existing || existing.shop_id !== shop.id) {
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+    if (existing.status !== 'Pending' || existing.payment_status === 'Paid') {
+      return res.status(409).json({
+        success: false,
+        message: 'Only pending, unpaid orders can be edited',
+      });
+    }
+    if (existing.payment_intent_id) {
+      return res.status(409).json({
+        success: false,
+        message: 'This order cannot be edited after online payment has started',
+      });
+    }
+
+    const rawItems = req.body.items === undefined
+      ? existing.items.map(item => ({ catalogItemId: item.catalog_item_id, quantity: item.quantity }))
+      : req.body.items;
+
+    if (!Array.isArray(rawItems) || rawItems.length === 0 || rawItems.length > 100) {
+      return res.status(400).json({ success: false, message: 'Order must contain between 1 and 100 items' });
+    }
+
+    const items = [];
+    const itemIds = new Set();
+    for (const rawItem of rawItems) {
+      const catalogItemId = Number(rawItem.catalogItemId);
+      const quantity = Number(rawItem.quantity);
+      if (!Number.isInteger(catalogItemId) || catalogItemId <= 0) {
+        return res.status(400).json({ success: false, message: 'Each item must have a valid catalogItemId' });
+      }
+      if (!Number.isInteger(quantity) || quantity <= 0 || quantity > 1000000) {
+        return res.status(400).json({ success: false, message: 'Each item quantity must be a positive whole number' });
+      }
+      if (itemIds.has(catalogItemId)) {
+        return res.status(400).json({ success: false, message: 'The same catalog item cannot appear more than once' });
+      }
+      itemIds.add(catalogItemId);
+      items.push({ catalogItemId, quantity });
+    }
+
+    const { data: catalogItems, error: catalogError } = await supabase.from('supplier_catalog')
+      .select('id, product_name, minimum_order_quantity, stock_available')
+      .in('id', [...itemIds])
+      .eq('supplier_id', existing.supplier_id)
+      .eq('is_active', true);
+    if (catalogError) throw catalogError;
+
+    const catalogMap = new Map((catalogItems || []).map(item => [Number(item.id), item]));
+    for (const item of items) {
+      const catalogItem = catalogMap.get(item.catalogItemId);
+      if (!catalogItem) {
+        return res.status(400).json({ success: false, message: 'One or more catalog items are unavailable' });
+      }
+      if (item.quantity < catalogItem.minimum_order_quantity) {
+        return res.status(400).json({
+          success: false,
+          message: `Minimum order quantity for "${catalogItem.product_name}" is ${catalogItem.minimum_order_quantity}`,
+        });
+      }
+      if (item.quantity > catalogItem.stock_available) {
+        return res.status(400).json({
+          success: false,
+          message: `Only ${catalogItem.stock_available} units of "${catalogItem.product_name}" are available`,
+        });
+      }
+    }
+
+    const deliveryAddress = req.body.deliveryAddress === undefined
+      ? existing.delivery_address
+      : String(req.body.deliveryAddress).trim();
+    const deliveryCity = req.body.deliveryCity === undefined
+      ? existing.delivery_city
+      : String(req.body.deliveryCity).trim();
+    const notes = req.body.notes === undefined ? existing.notes : String(req.body.notes).trim();
+    const estimatedDeliveryDate = req.body.estimatedDeliveryDate === undefined
+      ? existing.estimated_delivery_date
+      : req.body.estimatedDeliveryDate;
+
+    if (!deliveryAddress || deliveryAddress.length > 500) {
+      return res.status(400).json({ success: false, message: 'Delivery address is required and must be 500 characters or fewer' });
+    }
+    if (deliveryCity && deliveryCity.length > 100) {
+      return res.status(400).json({ success: false, message: 'Delivery city must be 100 characters or fewer' });
+    }
+    if (notes && notes.length > 1000) {
+      return res.status(400).json({ success: false, message: 'Notes must be 1000 characters or fewer' });
+    }
+    if (estimatedDeliveryDate && !/^\d{4}-\d{2}-\d{2}$/.test(String(estimatedDeliveryDate))) {
+      return res.status(400).json({ success: false, message: 'Estimated delivery date must use YYYY-MM-DD format' });
+    }
+
+    const updated = await Order.updatePendingOrder({
+      orderId: existing.id,
+      shopId: shop.id,
+      items,
+      deliveryAddress,
+      deliveryCity: deliveryCity || null,
+      estimatedDeliveryDate: estimatedDeliveryDate || null,
+      notes: notes || null,
+    });
+
+    const { data: supplierRow } = await supabase.from('suppliers')
+      .select('user_id').eq('id', existing.supplier_id).maybeSingle();
+    if (supplierRow) {
+      Notification.create({
+        userId: supplierRow.user_id,
+        type: 'ORDER_UPDATED',
+        title: 'Purchase Order Updated',
+        message: `${shop.shop_name} updated order ${existing.order_number}`,
+      }).catch(err => console.error('Order update notification failed:', err.message));
+    }
+
+    const order = await Order.findByIdWithItems(updated.id || existing.id);
+    res.json({ success: true, message: 'Order updated successfully', data: order });
+  } catch (error) {
+    console.error('Update order error:', error);
+    const conflictMessages = ['ORDER_NOT_EDITABLE', 'ORDER_ALREADY_PAID', 'ORDER_PAYMENT_IN_PROGRESS'];
+    if (conflictMessages.includes(error.message)) {
+      return res.status(409).json({ success: false, message: 'The order changed and can no longer be edited. Refresh and try again.' });
+    }
+    if (error.code === 'P0001') {
+      return res.status(400).json({ success: false, message: error.message.replaceAll('_', ' ').toLowerCase() });
+    }
     res.status(500).json({ success: false, message: error.message || 'Server error' });
   }
 };

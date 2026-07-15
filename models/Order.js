@@ -1,4 +1,5 @@
 const supabase = require('../config/supabase');
+const Rating = require('./Rating');
 
 class Order {
   static async create(orderData) {
@@ -48,11 +49,17 @@ class Order {
     if (!orders || orders.length === 0) return [];
 
     const supplierIds = [...new Set(orders.map(o => o.supplier_id))];
-    const { data: suppliers } = await supabase.from('suppliers')
-      .select('id, company_name').in('id', supplierIds);
+    const [{ data: suppliers }, ratingMap] = await Promise.all([
+      supabase.from('suppliers').select('id, company_name').in('id', supplierIds),
+      Rating.findForTransactions('SUPPLIER', orders.map(o => o.id)),
+    ]);
     const supplierMap = (suppliers || []).reduce((m, s) => { m[s.id] = s; return m; }, {});
 
-    return orders.map(o => ({ ...o, supplier_name: supplierMap[o.supplier_id]?.company_name }));
+    return orders.map(o => ({
+      ...o,
+      supplier_name: supplierMap[o.supplier_id]?.company_name,
+      rating: ratingMap.get(Number(o.id)) || null,
+    }));
   }
 
   static async findByIdWithItems(id) {
@@ -60,9 +67,34 @@ class Order {
     if (error) throw error;
     if (!order) return null;
 
-    const { data: items } = await supabase.from('order_items').select('*').eq('order_id', id);
+    const [{ data: items, error: itemsError }, { data: supplier, error: supplierError }] = await Promise.all([
+      supabase.from('order_items').select('*').eq('order_id', id).order('id'),
+      supabase.from('suppliers').select('company_name').eq('id', order.supplier_id).maybeSingle(),
+    ]);
+    if (itemsError) throw itemsError;
+    if (supplierError) throw supplierError;
     order.items = items || [];
+    order.supplier_name = supplier?.company_name || null;
+    const ratingMap = await Rating.findForTransactions('SUPPLIER', [order.id]);
+    order.rating = ratingMap.get(Number(order.id)) || null;
     return order;
+  }
+
+  static async updatePendingOrder({ orderId, shopId, items, deliveryAddress, deliveryCity, estimatedDeliveryDate, notes }) {
+    const { data, error } = await supabase.rpc('update_pending_order', {
+      p_order_id: orderId,
+      p_shop_id: shopId,
+      p_items: items.map(item => ({
+        catalog_item_id: item.catalogItemId,
+        quantity: item.quantity,
+      })),
+      p_delivery_address: deliveryAddress,
+      p_delivery_city: deliveryCity,
+      p_estimated_delivery_date: estimatedDeliveryDate || null,
+      p_notes: notes || null,
+    });
+    if (error) throw error;
+    return data;
   }
 
   static async updateStatus(id, status) {

@@ -90,6 +90,15 @@ class User {
     return data;
   }
 
+  static async findPasswordById(id) {
+    const { data, error } = await supabase.from('users')
+      .select('id, password')
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw error;
+    return data;
+  }
+
   static async getVerificationState(id) {
     const { data, error } = await supabase.from('users')
       .select('verification_status, verification_docs, rejection_reason, submitted_at, verified_at')
@@ -186,6 +195,22 @@ class User {
   static async hashPassword(plainPassword) {
     const salt = await bcrypt.genSalt(10);
     return bcrypt.hash(plainPassword, salt);
+  }
+
+  static async updatePassword(id, plainPassword) {
+    const hashedPassword = await this.hashPassword(plainPassword);
+
+    const { error } = await supabase.from('users')
+      .update({
+        password: hashedPassword,
+        reset_token: null,
+        reset_token_expiry: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', id);
+
+    if (error) throw error;
+    return true;
   }
 
   static async update(id, updates) {

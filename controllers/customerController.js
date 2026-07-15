@@ -1,6 +1,7 @@
 const Reservation = require('../models/Reservation');
 const { calculateDistance, validateCoordinates } = require('../utils/geolocation');
 const supabase = require('../config/supabase');
+const Rating = require('../models/Rating');
 
 // @desc    Search products across all active shops
 // @route   GET /api/customer/products/search?q=cement&city=colombo&category=Tools
@@ -39,6 +40,7 @@ exports.searchProducts = async (req, res) => {
     if (productError) throw productError;
 
     // Step 3: flatten with shop info
+    const summaries = await Rating.getSummaryMap('SHOP', shopIds);
     const result = (products || []).map(p => ({
       ...p,
       shop_id:      p.shop_id,
@@ -49,6 +51,7 @@ exports.searchProducts = async (req, res) => {
       email:        shopMap[p.shop_id]?.email,
       opening_time: shopMap[p.shop_id]?.opening_time,
       closing_time: shopMap[p.shop_id]?.closing_time,
+      ...(summaries.get(Number(p.shop_id)) || { rating_average: null, rating_count: 0 }),
     }));
 
     res.json({ success: true, data: result });
@@ -88,6 +91,7 @@ exports.browseProducts = async (req, res) => {
     const { data: products, error: productError } = await productQuery;
     if (productError) throw productError;
 
+    const summaries = await Rating.getSummaryMap('SHOP', shopIds);
     const result = (products || []).map(p => ({
       ...p,
       shop_name:    shopMap[p.shop_id]?.shop_name,
@@ -96,6 +100,7 @@ exports.browseProducts = async (req, res) => {
       phone:        shopMap[p.shop_id]?.phone,
       opening_time: shopMap[p.shop_id]?.opening_time,
       closing_time: shopMap[p.shop_id]?.closing_time,
+      ...(summaries.get(Number(p.shop_id)) || { rating_average: null, rating_count: 0 }),
     }));
 
     res.json({ success: true, data: result });
@@ -117,7 +122,12 @@ exports.getShops = async (req, res) => {
     if (city) query = query.ilike('city', `%${city.trim()}%`);
     const { data, error } = await query;
     if (error) throw error;
-    res.json({ success: true, data: data || [] });
+    const shops = data || [];
+    const summaries = await Rating.getSummaryMap('SHOP', shops.map(s => s.id));
+    res.json({ success: true, data: shops.map(shop => ({
+      ...shop,
+      ...(summaries.get(Number(shop.id)) || { rating_average: null, rating_count: 0 }),
+    })) });
   } catch (error) {
     console.error('Get shops error:', error);
     res.status(500).json({ success: false, message: error.message || 'Server error' });
@@ -142,7 +152,19 @@ exports.getShopProducts = async (req, res) => {
       .eq('shop_id', shopId).gt('quantity_on_hand', 0).order('category').order('product_name');
     if (productError) throw productError;
 
-    res.json({ success: true, data: { shop, products: products || [] } });
+    // Ratings are supplementary. A rating schema/configuration issue must not
+    // prevent customers from opening a shop's product catalog.
+    let ratingSummary = { rating_average: null, rating_count: 0 };
+    try {
+      const summaries = await Rating.getSummaryMap('SHOP', [shop.id]);
+      ratingSummary = summaries.get(Number(shop.id)) || ratingSummary;
+    } catch (ratingError) {
+      console.warn('Shop catalog rating summary unavailable:', ratingError.message);
+    }
+    res.json({ success: true, data: {
+      shop: { ...shop, ...ratingSummary },
+      products: products || [],
+    } });
   } catch (error) {
     console.error('Get shop products error:', error);
     res.status(500).json({ success: false, message: error.message || 'Server error' });
@@ -322,9 +344,11 @@ exports.getNearbyShops = async (req, res) => {
       return m;
     }, {});
 
+    const summaries = await Rating.getSummaryMap('SHOP', shopIds);
     const result = shopsWithDistance.map(shop => ({
       ...shop,
       products_count: countMap[shop.id] || 0,
+      ...(summaries.get(Number(shop.id)) || { rating_average: null, rating_count: 0 }),
     }));
 
     res.json({ success: true, data: result });

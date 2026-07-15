@@ -383,6 +383,42 @@ exports.updateProfile = async (req, res) => {
   }
 };
 
+// @desc    Change current user's password
+// @route   PUT /api/auth/change-password
+// @access  Private
+exports.changePassword = async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
+
+    const { currentPassword, newPassword } = req.body;
+    const user = await User.findPasswordById(req.user.id);
+
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    const isCurrentPasswordValid = await User.verifyPassword(currentPassword, user.password);
+    if (!isCurrentPasswordValid) {
+      return res.status(400).json({ success: false, message: 'Current password is incorrect' });
+    }
+
+    const isSamePassword = await User.verifyPassword(newPassword, user.password);
+    if (isSamePassword) {
+      return res.status(400).json({ success: false, message: 'New password must be different from current password' });
+    }
+
+    await User.updatePassword(user.id, newPassword);
+
+    res.json({ success: true, message: 'Password changed successfully' });
+  } catch (error) {
+    console.error('Change password error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
+  }
+};
+
 // @desc    Request password reset
 // @route   POST /api/auth/forgot-password
 // @access  Public

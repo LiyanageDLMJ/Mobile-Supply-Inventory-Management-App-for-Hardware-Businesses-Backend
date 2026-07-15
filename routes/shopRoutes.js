@@ -25,5 +25,6 @@ router.get('/suppliers/:supplierId/catalog', shopController.getSupplierCatalog);
 router.post('/orders', shopController.createOrder);
 router.get('/orders', shopController.getOrders);
 router.get('/orders/:id', shopController.getOrder);
+router.put('/orders/:id', shopController.updateOrder);
 
 module.exports = router;

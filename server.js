@@ -29,6 +29,7 @@ app.use('/api/payments', require('./routes/paymentRoutes'));
 app.use('/api/notifications', require('./routes/notificationRoutes'));
 app.use('/api/verification', require('./routes/verificationRoutes'));
 app.use('/api/admin', require('./routes/adminRoutes'));
+app.use('/api/ratings', require('./routes/ratingRoutes'));
 
 app.get('/api/health', (req, res) => {
   res.status(200).json({ success: true, message: 'Server is running', timestamp: new Date().toISOString() });

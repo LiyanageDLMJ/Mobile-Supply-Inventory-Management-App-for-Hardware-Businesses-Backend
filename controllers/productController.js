@@ -4,6 +4,18 @@ const Notification = require('../models/Notification');
 const supabase = require('../config/supabase');
 const { maybeNotifyLowStock } = require('../utils/stockAlert');
 
+const getOwnedProduct = async (userId, productId) => {
+  const shop = await Shop.findByOwnerId(userId);
+  if (!shop) return { status: 404, message: 'Shop not found' };
+
+  const product = await Product.findById(productId);
+  if (!product || String(product.shop_id) !== String(shop.id)) {
+    return { status: 404, message: 'Product not found' };
+  }
+
+  return { shop, product };
+};
+
 // @desc    Get all products for shop owner
 // @route   GET /api/products
 // @access  Private (Shop Owner)
@@ -25,8 +37,12 @@ exports.getAllProducts = async (req, res) => {
 // @access  Private (Shop Owner)
 exports.getProduct = async (req, res) => {
   try {
-    const product = await Product.findById(req.params.id);
-    if (!product) return res.status(404).json({ success: false, message: 'Product not found' });
+    const result = await getOwnedProduct(req.user.id, req.params.id);
+    if (result.status) {
+      return res.status(result.status).json({ success: false, message: result.message });
+    }
+
+    const { product } = result;
     res.json({ success: true, data: product });
   } catch (error) {
     console.error('Get product error:', error);
@@ -84,13 +100,12 @@ exports.createProduct = async (req, res) => {
 // @access  Private (Shop Owner)
 exports.updateProduct = async (req, res) => {
   try {
-    const shop = await Shop.findByOwnerId(req.user.id);
-    if (!shop) return res.status(404).json({ success: false, message: 'Shop not found' });
-
-    const product = await Product.findById(req.params.id);
-    if (!product || product.shop_id !== shop.id) {
-      return res.status(404).json({ success: false, message: 'Product not found' });
+    const result = await getOwnedProduct(req.user.id, req.params.id);
+    if (result.status) {
+      return res.status(result.status).json({ success: false, message: result.message });
     }
+
+    const { product } = result;
 
     const {
       productName, description, category, subCategory,
@@ -143,6 +158,11 @@ exports.updateProduct = async (req, res) => {
 exports.updateQuantity = async (req, res) => {
   try {
     const { quantity, operation } = req.body;
+    const result = await getOwnedProduct(req.user.id, req.params.id);
+    if (result.status) {
+      return res.status(result.status).json({ success: false, message: result.message });
+    }
+
     const product = await Product.updateQuantity(req.params.id, quantity, operation);
 
     // Crossing-guard alert — only fires when stock first drops to/below threshold.
@@ -169,6 +189,11 @@ exports.updateQuantity = async (req, res) => {
 // @access  Private (Shop Owner)
 exports.deleteProduct = async (req, res) => {
   try {
+    const result = await getOwnedProduct(req.user.id, req.params.id);
+    if (result.status) {
+      return res.status(result.status).json({ success: false, message: result.message });
+    }
+
     await Product.delete(req.params.id);
     res.json({ success: true, message: 'Product deleted successfully' });
   } catch (error) {

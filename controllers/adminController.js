@@ -1,6 +1,7 @@
 const User = require('../models/User');
 const Notification = require('../models/Notification');
 const supabase = require('../config/supabase');
+const Rating = require('../models/Rating');
 
 // @desc    List shop owners + suppliers, optionally filtered by status
 // @route   GET /api/admin/users?status=PENDING
@@ -274,6 +275,69 @@ exports.getStats = async (_req, res) => {
     res.json({ success: true, data: counts });
   } catch (error) {
     console.error('Admin stats error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
+  }
+};
+
+// @desc    List and filter ratings for moderation
+// @route   GET /api/admin/ratings?targetType=SUPPLIER&stars=1&visibility=VISIBLE
+exports.listRatings = async (req, res) => {
+  try {
+    const targetType = req.query.targetType ? String(req.query.targetType).toUpperCase() : null;
+    const visibility = req.query.visibility ? String(req.query.visibility).toUpperCase() : 'ALL';
+    const stars = req.query.stars ? Number(req.query.stars) : null;
+    if (targetType && !['SHOP', 'SUPPLIER'].includes(targetType)) {
+      return res.status(400).json({ success: false, message: 'targetType must be SHOP or SUPPLIER' });
+    }
+    if (!['ALL', 'VISIBLE', 'HIDDEN'].includes(visibility)) {
+      return res.status(400).json({ success: false, message: 'visibility must be ALL, VISIBLE, or HIDDEN' });
+    }
+    if (stars && (!Number.isInteger(stars) || stars < 1 || stars > 5)) {
+      return res.status(400).json({ success: false, message: 'stars must be between 1 and 5' });
+    }
+    const ratings = await Rating.listForModeration({ targetType, stars, visibility });
+    res.json({ success: true, data: ratings });
+  } catch (error) {
+    console.error('Admin list ratings error:', error);
+    if (error.code === 'RATINGS_MIGRATION_REQUIRED') {
+      return res.status(503).json({ success: false, message: error.message });
+    }
+    res.status(500).json({ success: false, message: error.message || 'Server error' });
+  }
+};
+
+// @desc    Hide or restore a rating while preserving an audit trail
+// @route   PATCH /api/admin/ratings/:id/moderation
+exports.moderateRating = async (req, res) => {
+  try {
+    const hidden = req.body.hidden !== false;
+    const reason = String(req.body.reason || '').trim();
+    if (hidden && reason.length < 3) {
+      return res.status(400).json({ success: false, message: 'A moderation reason of at least 3 characters is required' });
+    }
+    if (reason.length > 500) {
+      return res.status(400).json({ success: false, message: 'Moderation reason must be 500 characters or fewer' });
+    }
+    const existing = await Rating.findById(req.params.id);
+    if (!existing) return res.status(404).json({ success: false, message: 'Rating not found' });
+    const rating = await Rating.setModeration(existing.id, req.user.id, hidden, reason);
+    Notification.create({
+      userId: existing.reviewer_id,
+      type: hidden ? 'RATING_MODERATED' : 'RATING_RESTORED',
+      title: hidden ? 'Rating moderated' : 'Rating restored',
+      message: hidden
+        ? `Your rating was hidden by an administrator: ${reason}`
+        : 'Your verified rating was restored after administrator review.',
+    }).catch((err) => console.error('Rating moderation notification failed:', err.message));
+    res.json({ success: true, message: hidden ? 'Rating hidden' : 'Rating restored', data: rating });
+  } catch (error) {
+    console.error('Admin moderate rating error:', error);
+    if (error.code === '42703') {
+      return res.status(503).json({
+        success: false,
+        message: 'Rating moderation database update is required. Re-run scripts/ratings_migration.sql in Supabase SQL Editor.',
+      });
+    }
     res.status(500).json({ success: false, message: error.message || 'Server error' });
   }
 };

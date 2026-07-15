@@ -11,6 +11,8 @@ const {
   approveUser,
   rejectUser,
   getStats,
+  listRatings,
+  moderateRating,
 } = require('../controllers/adminController');
 
 router.use(protect);
@@ -25,5 +27,7 @@ router.get('/users/:id', getUserDetail);
 router.get('/users/:id/documents/:index', getUserDocument);
 router.post('/users/:id/approve', approveUser);
 router.post('/users/:id/reject', rejectUser);
+router.get('/ratings', listRatings);
+router.patch('/ratings/:id/moderation', moderateRating);
 
 module.exports = router;

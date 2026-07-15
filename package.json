@@ -7,7 +7,8 @@
     "start": "node server.js",
     "dev": "nodemon server.js",
     "dev:ngrok": "node scripts/startWithNgrok.js",
-    "db:setup": "node scripts/setupDatabase.js"
+    "db:setup": "node scripts/setupDatabase.js",
+    "test": "node --test tests/ratingPolicy.test.js"
   },
   "keywords": [
     "express",
